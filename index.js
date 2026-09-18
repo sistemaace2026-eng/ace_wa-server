@@ -21,7 +21,7 @@ const API_KEY = process.env.API_KEY || 'change-this-key';
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const PORT = process.env.PORT || 3000;
 
-const instances = {};
+const instances = {}; // instanceId -> { sock, state, qr, phone, qrTimeout }
 
 // ── Auth middleware ──────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -86,13 +86,14 @@ async function startInstance(instanceId) {
     }
   });
 
+  // Encaminha status de entrega de mensagens para o webhook
   sock.ev.on('messages.update', (updates) => {
     for (const u of updates) {
       if (u.key.fromMe) {
         const status = u.update?.status || u.status;
         notifyWebhook(instanceId, 'message_status', {
           messageId: u.key.id,
-          status,
+          status, // 'pending' | 'sent' | 'delivered' | 'read'
         });
       }
     }
@@ -120,6 +121,7 @@ async function notifyWebhook(instanceId, event, data) {
 
 // ── Routes ───────────────────────────────────────────────────────
 
+// Criar/reconectar instância
 app.post('/instance/create', async (req, res) => {
   const { instanceId } = req.body;
   if (!instanceId) return res.status(400).json({ error: 'instanceId obrigatório' });
@@ -130,6 +132,7 @@ app.post('/instance/create', async (req, res) => {
   res.json({ instanceId, state: 'connecting' });
 });
 
+// Obter QR Code
 app.get('/instance/:id/qr', async (req, res) => {
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
@@ -145,12 +148,37 @@ app.get('/instance/:id/qr', async (req, res) => {
   }
 });
 
+// Gerar código de vinculação (pairing code) — alternativa ao QR Code
+app.post('/instance/:id/pair-code', async (req, res) => {
+  const inst = instances[req.params.id];
+  if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
+  if (inst.state === 'connected') {
+    return res.json({ state: 'connected', phone: inst.phone, code: null });
+  }
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'phone obrigatório' });
+  try {
+    let clean = String(phone).replace(/\D/g, '');
+    if (!clean.startsWith('55')) clean = '55' + clean;
+    let ready = inst.sock?.ev;
+    if (!ready) return res.status(400).json({ error: 'Instância ainda inicializando. Tente novamente em alguns segundos.' });
+    const code = await inst.sock.requestPairingCode(clean);
+    console.log(`[${req.params.id}] Pairing code gerado: ${code}`);
+    res.json({ state: inst.state, code });
+  } catch (e) {
+    console.error(`[${req.params.id}] Erro ao gerar pairing code:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Obter status
 app.get('/instance/:id/status', (req, res) => {
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
   res.json({ state: inst.state, phone: inst.phone });
 });
 
+// Enviar mensagem
 app.post('/instance/:id/send', async (req, res) => {
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
@@ -169,6 +197,7 @@ app.post('/instance/:id/send', async (req, res) => {
   }
 });
 
+// Desconectar instância
 app.post('/instance/:id/disconnect', async (req, res) => {
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
@@ -181,6 +210,7 @@ app.post('/instance/:id/disconnect', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Listar instâncias
 app.get('/instances', (req, res) => {
   const list = Object.keys(instances).map((id) => ({
     instanceId: id,
@@ -190,6 +220,7 @@ app.get('/instances', (req, res) => {
   res.json({ instances: list });
 });
 
+// Health check
 app.get('/health', (req, res) => {
   res.json({ ok: true, instances: Object.keys(instances).length });
 });
