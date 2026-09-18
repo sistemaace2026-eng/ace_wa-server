@@ -1,5 +1,5 @@
 {
-  "name": "package",
+  "name": "whatsapp-server",
   "version": "1.0.0",
   "description": "Servidor WhatsApp self-hosted com Baileys para Sistema ACE",
   "main": "index.js",
