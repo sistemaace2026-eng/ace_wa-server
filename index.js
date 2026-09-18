@@ -98,7 +98,7 @@ async function startInstance(instanceId) {
     }
   });
 
-  return inst;
+  return instances[instanceId];
 }
 
 // ── Webhook helper ───────────────────────────────────────────────
