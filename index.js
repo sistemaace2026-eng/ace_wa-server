@@ -23,6 +23,12 @@ const PORT = process.env.PORT || 3000;
 
 const instances = {}; // instanceId -> { sock, state, qr, phone, qrTimeout }
 
+// Valida instanceId — previne path traversal (../, separadores, etc.)
+const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
+function validInstanceId(id) {
+  return typeof id === 'string' && id.length > 0 && id.length <= 128 && INSTANCE_ID_RE.test(id);
+}
+
 // ── Auth middleware ──────────────────────────────────────────────
 app.use((req, res, next) => {
   const key = (req.headers.authorization || '').replace('Bearer ', '');
@@ -124,7 +130,7 @@ async function notifyWebhook(instanceId, event, data) {
 // Criar/reconectar instância
 app.post('/instance/create', async (req, res) => {
   const { instanceId } = req.body;
-  if (!instanceId) return res.status(400).json({ error: 'instanceId obrigatório' });
+  if (!validInstanceId(instanceId)) return res.status(400).json({ error: 'instanceId inválido' });
   if (instances[instanceId] && instances[instanceId].state === 'connected') {
     return res.json({ instanceId, state: 'connected', phone: instances[instanceId].phone });
   }
@@ -134,6 +140,7 @@ app.post('/instance/create', async (req, res) => {
 
 // Obter QR Code
 app.get('/instance/:id/qr', async (req, res) => {
+  if (!validInstanceId(req.params.id)) return res.status(400).json({ error: 'instanceId inválido' });
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
   if (inst.state === 'connected') {
@@ -150,6 +157,7 @@ app.get('/instance/:id/qr', async (req, res) => {
 
 // Gerar código de vinculação (pairing code) — alternativa ao QR Code
 app.post('/instance/:id/pair-code', async (req, res) => {
+  if (!validInstanceId(req.params.id)) return res.status(400).json({ error: 'instanceId inválido' });
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
   if (inst.state === 'connected') {
@@ -160,8 +168,22 @@ app.post('/instance/:id/pair-code', async (req, res) => {
   try {
     let clean = String(phone).replace(/\D/g, '');
     if (!clean.startsWith('55')) clean = '55' + clean;
-    let ready = inst.sock?.ev;
-    if (!ready) return res.status(400).json({ error: 'Instância ainda inicializando. Tente novamente em alguns segundos.' });
+    // Aguarda o socket concluir o handshake com os servidores do WhatsApp.
+    // O QR code só fica disponível após o handshake — sem isso, requestPairingCode
+    // gera um código que o WhatsApp do celular não reconhece.
+    let ready = false;
+    for (let i = 0; i < 15; i++) {
+      if (inst.state === 'connected') { ready = true; break; }
+      if (inst.qr) { ready = true; break; } // QR disponível = handshake concluído
+      if (inst.state === 'disconnected') break; // não adianta esperar
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (!ready) {
+      return res.status(400).json({ error: 'Instância ainda inicializando. Aguarde alguns segundos e tente novamente.' });
+    }
+    if (inst.state === 'connected') {
+      return res.json({ state: 'connected', phone: inst.phone, code: null });
+    }
     const code = await inst.sock.requestPairingCode(clean);
     console.log(`[${req.params.id}] Pairing code gerado: ${code}`);
     res.json({ state: inst.state, code });
@@ -173,6 +195,7 @@ app.post('/instance/:id/pair-code', async (req, res) => {
 
 // Obter status
 app.get('/instance/:id/status', (req, res) => {
+  if (!validInstanceId(req.params.id)) return res.status(400).json({ error: 'instanceId inválido' });
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
   res.json({ state: inst.state, phone: inst.phone });
@@ -180,6 +203,7 @@ app.get('/instance/:id/status', (req, res) => {
 
 // Enviar mensagem
 app.post('/instance/:id/send', async (req, res) => {
+  if (!validInstanceId(req.params.id)) return res.status(400).json({ error: 'instanceId inválido' });
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
   if (inst.state !== 'connected') return res.status(400).json({ error: 'WhatsApp não conectado' });
@@ -199,6 +223,7 @@ app.post('/instance/:id/send', async (req, res) => {
 
 // Desconectar instância
 app.post('/instance/:id/disconnect', async (req, res) => {
+  if (!validInstanceId(req.params.id)) return res.status(400).json({ error: 'instanceId inválido' });
   const inst = instances[req.params.id];
   if (!inst) return res.status(404).json({ error: 'Instância não encontrada' });
   try {
@@ -230,3 +255,5 @@ app.listen(PORT, () => {
   console.log(`   API Key: ${API_KEY === 'change-this-key' ? '⚠️  PADRÃO — altere!' : '✓ configurada'}`);
   console.log(`   Webhook: ${WEBHOOK_URL || '⚠️  não configurado'}`);
 });
+
+  
