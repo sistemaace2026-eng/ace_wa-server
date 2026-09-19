@@ -48,7 +48,7 @@ async function startInstance(instanceId) {
     version,
     auth: state,
     printQRInTerminal: false,
-    browser: ['Sistema ACE', 'Chrome', '1.0.0'],
+  browser: ['Mac OS', 'Chrome', '120.0.0.0'],
     logger: require('pino')({ level: 'silent' }),
   });
 
