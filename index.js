@@ -9,6 +9,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
@@ -48,7 +49,7 @@ async function startInstance(instanceId) {
     version,
     auth: state,
     printQRInTerminal: false,
-  browser: ['Mac OS', 'Chrome', '120.0.0.0'],
+    browser: Browsers.macOS('Chrome'),
     logger: require('pino')({ level: 'silent' }),
   });
 
@@ -57,6 +58,7 @@ async function startInstance(instanceId) {
     state: 'connecting',
     qr: null,
     phone: null,
+    pendingPairing: null,
   };
 
   sock.ev.on('creds.update', saveCreds);
@@ -70,6 +72,21 @@ async function startInstance(instanceId) {
       inst.qr = qr;
       inst.state = 'qr_ready';
       console.log(`[${instanceId}] QR pronto para escanear`);
+      // Se há solicitação de pairing code pendente, gera o código agora.
+      // Padrão oficial Baileys: requestPairingCode deve ser chamado no evento qr,
+      // não após polling — isso garante que o socket está no estado correto.
+      if (inst.pendingPairing) {
+        const { phone, resolve, reject } = inst.pendingPairing;
+        inst.pendingPairing = null;
+        try {
+          const code = await sock.requestPairingCode(phone);
+          console.log(`[${instanceId}] Pairing code gerado: ${code}`);
+          resolve(code);
+        } catch (e) {
+          console.error(`[${instanceId}] Erro ao gerar pairing code:`, e.message);
+          reject(e);
+        }
+      }
     }
 
     if (connection === 'open') {
@@ -82,6 +99,10 @@ async function startInstance(instanceId) {
 
     if (connection === 'close') {
       inst.state = 'disconnected';
+      if (inst.pendingPairing) {
+        inst.pendingPairing.reject(new Error('Conexão fechada'));
+        inst.pendingPairing = null;
+      }
       const code = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       console.log(`[${instanceId}] Desconectado (code=${code}). Reconnect=${shouldReconnect}`);
@@ -168,26 +189,27 @@ app.post('/instance/:id/pair-code', async (req, res) => {
   try {
     let clean = String(phone).replace(/\D/g, '');
     if (!clean.startsWith('55')) clean = '55' + clean;
-    // Aguarda o socket concluir o handshake com os servidores do WhatsApp.
-    // O QR code só fica disponível após o handshake — sem isso, requestPairingCode
-    // gera um código que o WhatsApp do celular não reconhece.
-    let ready = false;
-    for (let i = 0; i < 15; i++) {
-      if (inst.state === 'connected') { ready = true; break; }
-      if (inst.qr) { ready = true; break; } // QR disponível = handshake concluído
-      if (inst.state === 'disconnected') break; // não adianta esperar
-      await new Promise((r) => setTimeout(r, 1000));
+    
+    // Se o QR já está disponível, gera o código imediatamente
+    if (inst.qr && inst.state !== 'disconnected') {
+      const code = await inst.sock.requestPairingCode(clean);
+      console.log(`[${req.params.id}] Pairing code gerado: ${code}`);
+      return res.json({ state: inst.state, code });
     }
-    if (!ready) {
-      return res.status(400).json({ error: 'Instância ainda inicializando. Aguarde alguns segundos e tente novamente.' });
-    }
-    if (inst.state === 'connected') {
-      return res.json({ state: 'connected', phone: inst.phone, code: null });
-    }
-    const code = await inst.sock.requestPairingCode(clean);
-    console.log(`[${req.params.id}] Pairing code gerado: ${code}`);
+    
+    // Registra solicitação pendente — o código será gerado quando o evento qr chegar.
+    // Padrão oficial Baileys: requestPairingCode deve ser chamado no evento qr.
+    const pairingPromise = new Promise((resolve, reject) => {
+      inst.pendingPairing = { phone: clean, resolve, reject };
+    });
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), 25000)
+    );
+    
+    const code = await Promise.race([pairingPromise, timeoutPromise]);
     res.json({ state: inst.state, code });
   } catch (e) {
+    inst.pendingPairing = null;
     console.error(`[${req.params.id}] Erro ao gerar pairing code:`, e.message);
     res.status(500).json({ error: e.message });
   }
@@ -255,5 +277,3 @@ app.listen(PORT, () => {
   console.log(`   API Key: ${API_KEY === 'change-this-key' ? '⚠️  PADRÃO — altere!' : '✓ configurada'}`);
   console.log(`   Webhook: ${WEBHOOK_URL || '⚠️  não configurado'}`);
 });
-
-  
